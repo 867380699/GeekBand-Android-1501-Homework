@@ -1,10 +1,10 @@
 /*
  * Copyright (c) 2010, Sony Ericsson Mobile Communication AB. All rights reserved.
  *
- * Redistribution and use in source and binary forms, with or without modification,
+ * Redistribution and use in source and binary forms, with or without modification, 
  * are permitted provided that the following conditions are met:
  *
- *    * Redistributions of source code must retain the above copyright notice, this
+ *    * Redistributions of source code must retain the above copyright notice, this 
  *      list of conditions and the following disclaimer.
  *    * Redistributions in binary form must reproduce the above copyright notice,
  *      this list of conditions and the following disclaimer in the documentation
@@ -14,7 +14,7 @@
  *      this software without specific prior written permission.
  *
  * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED 
  * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
  * IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
  * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
@@ -37,9 +37,12 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.util.AttributeSet;
+import android.util.Log;
 import android.view.MotionEvent;
+import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.animation.AnimationUtils;
 import android.widget.Adapter;
 import android.widget.AdapterView;
 
@@ -50,11 +53,26 @@ import java.util.LinkedList;
  */
 public class MyListView extends AdapterView<Adapter> {
 
+    /** Unit used for the velocity tracker */
+    private static final int PIXELS_PER_SECOND = 1000;
+
+    /** Tolerance for the position used for snapping */
+    private static final float POSITION_TOLERANCE = 1f;
+
+    /** Tolerance for the velocity */
+    private static final float VELOCITY_TOLERANCE = 1f;
+
     /** Width of the items compared to the width of the list */
     private static final float ITEM_WIDTH = 0.85f;
 
     /** Space occupied by the item relative to the height of the item */
     private static final float ITEM_VERTICAL_SPACE = 1.45f;
+
+    /** Wavelength of the sine shape relative to the height of the view */
+    private static final float WAVELENGTH = 0.9f;
+
+    /** Amplitude of the sine shape relative to the width of the view */
+    private static final float AMPLITUDE = 0.0f;
 
     /** Ambient light intensity */
     private static final int AMBIENT_LIGHT = 55;
@@ -133,6 +151,15 @@ public class MyListView extends AdapterView<Adapter> {
     /** The adaptor position of the last visible item */
     private int mLastItemPosition;
 
+    /** Velocity tracker used to get fling velocities */
+    private VelocityTracker mVelocityTracker;
+
+    /** Dynamics object used to handle fling and snap */
+    private Dynamics mDynamics;
+
+    /** Runnable used to animate fling and snap */
+    private Runnable mDynamicsRunnable;
+
     /** A list of cached (re-usable) item views */
     private final LinkedList<View> mCachedItemViews = new LinkedList<View>();
 
@@ -156,6 +183,9 @@ public class MyListView extends AdapterView<Adapter> {
 
     /** true if lighting of the items is enabled */
     private boolean mLightEnabled = true;
+
+    /** The last snap position */
+    private int mLastSnapPos = Integer.MIN_VALUE;
 
     /**
      * Constructor
@@ -190,14 +220,45 @@ public class MyListView extends AdapterView<Adapter> {
     }
 
     /**
+     * Set the dynamics object used for fling and snap behavior.
+     * 
+     * @param dynamics The dynamics object
+     */
+    public void setDynamics(final Dynamics dynamics) {
+        if (mDynamics != null) {
+            dynamics.setState(mDynamics.getPosition(), mDynamics.getVelocity(), AnimationUtils
+                    .currentAnimationTimeMillis());
+        }
+        mDynamics = dynamics;
+        if (!mRotationEnabled) {
+            mDynamics.setMaxPosition(0);
+        }
+    }
+
+    /**
      * Enables and disables individual rotation of the items.
      * 
      * @param enable If rotation should be enabled or not
      */
     public void enableRotation(final boolean enable) {
+        // TODO Null check of mDynamics
         mRotationEnabled = enable;
+        mDynamics.setMaxPosition(Float.MAX_VALUE);
+        mDynamics.setMinPosition(-Float.MAX_VALUE);
+        mLastSnapPos = Integer.MIN_VALUE;
         if (!mRotationEnabled) {
             mListRotation = 0;
+            mDynamics.setMaxPosition(0);
+        } else {
+            mListRotation = -(DEGREES_PER_SCREEN * mListTop) / getHeight();
+            setSnapPoint();
+            if (mDynamics != null) {
+                // update the dynamics with the correct position and start the
+                // runnable
+                mDynamics.setState(mListTop, mDynamics.getVelocity(), AnimationUtils
+                        .currentAnimationTimeMillis());
+                post(mDynamicsRunnable);
+            }
         }
         invalidate();
     }
@@ -246,7 +307,7 @@ public class MyListView extends AdapterView<Adapter> {
                 return startScrollIfNeeded(event);
 
             default:
-                endTouch();
+                endTouch(0);
                 return false;
         }
     }
@@ -266,19 +327,26 @@ public class MyListView extends AdapterView<Adapter> {
                     startScrollIfNeeded(event);
                 }
                 if (mTouchState == TOUCH_STATE_SCROLL) {
+                    mVelocityTracker.addMovement(event);
                     scrollList((int)event.getY() - mTouchStartY);
                 }
                 break;
 
             case MotionEvent.ACTION_UP:
+                float velocity = 0;
                 if (mTouchState == TOUCH_STATE_CLICK) {
                     clickChildAt((int)event.getX(), (int)event.getY());
+                } else if (mTouchState == TOUCH_STATE_SCROLL) {
+                    mVelocityTracker.addMovement(event);
+                    mVelocityTracker.computeCurrentVelocity(PIXELS_PER_SECOND);
+                    velocity = mVelocityTracker.getYVelocity();
+                    Log.e("", "onTouchEvent velocity:"+velocity);
                 }
-                endTouch();
+                endTouch(velocity);
                 break;
 
             default:
-                endTouch();
+                endTouch(0);
                 break;
         }
         return true;
@@ -305,6 +373,14 @@ public class MyListView extends AdapterView<Adapter> {
 
         positionItems();
         invalidate();
+    }
+
+    @Override
+    protected void dispatchDraw(final Canvas canvas) {
+        //final long time1 = System.currentTimeMillis();
+        super.dispatchDraw(canvas);
+        //final long time2 = System.currentTimeMillis();
+        //Log.e("DEGUB", "Time to render frame: " + (time2 - time1));
     }
 
     @Override
@@ -403,10 +479,6 @@ public class MyListView extends AdapterView<Adapter> {
         // set the light
         if (mLightEnabled) {
             mPaint.setColorFilter(calculateLight(rotation));
-            //一个恐怖的反色矩阵
-            //mPaint.setColorFilter(new ColorMatrixColorFilter(new float[]{-1,0,0,0,255,0,-1,0,0,255,0,0,-1,0,255,0,0,0,1,0}));
-            //一个转灰度图的矩阵
-            //mPaint.setColorFilter(new ColorMatrixColorFilter(new float[]{0.3f,0.59f,0.11f,0,0,0.3f,0.59f,0.11f,0,0,0.3f,0.59f,0.11f,0,0,0,0,0,1,0}));
         } else {
             mPaint.setAlpha(0xFF - (int)(2 * Math.abs(rotation)));
         }
@@ -446,6 +518,9 @@ public class MyListView extends AdapterView<Adapter> {
      * @param event The down event
      */
     private void startTouch(final MotionEvent event) {
+        // user is touching the list -> no more fling
+        removeCallbacks(mDynamicsRunnable);
+
         // save the start place
         mTouchStartX = (int)event.getX();
         mTouchStartY = (int)event.getY();
@@ -454,6 +529,10 @@ public class MyListView extends AdapterView<Adapter> {
         // start checking for a long press
         startLongPressCheck();
 
+        // obtain a velocity tracker and feed it its first event
+        mVelocityTracker = VelocityTracker.obtain();
+        mVelocityTracker.addMovement(event);
+
         // we don't know if it's a click or a scroll yet, but until we know
         // assume it's a click
         mTouchState = TOUCH_STATE_CLICK;
@@ -461,10 +540,48 @@ public class MyListView extends AdapterView<Adapter> {
 
     /**
      * Resets and recycles all things that need to when we end a touch gesture
+     * 
+     * @param velocity The velocity of the gesture
      */
-    private void endTouch() {
+    private void endTouch(final float velocity) {
+        // recycle the velocity tracker
+        mVelocityTracker.recycle();
+        mVelocityTracker = null;
+
         // remove any existing check for longpress
         removeCallbacks(mLongPressRunnable);
+
+        // create the dynamics runnable if we haven't before
+        if (mDynamicsRunnable == null) {
+            mDynamicsRunnable = new Runnable() {
+                public void run() {
+                    // if we don't have any dynamics set we do nothing
+                    if (mDynamics == null) {
+                        return;
+                    }
+                    // we pretend that each frame of the fling/snap animation is
+                    // one touch gesture and therefore set the start position
+                    // every time
+                    mListTopStart = getChildTop(getChildAt(0)) - mListTopOffset;
+                    mDynamics.update(AnimationUtils.currentAnimationTimeMillis());
+
+                    scrollList((int)mDynamics.getPosition() - mListTopStart);
+
+                    if (!mDynamics.isAtRest(VELOCITY_TOLERANCE, POSITION_TOLERANCE)) {
+                        // the list is not at rest, so schedule a new frame
+                        postDelayed(this, 16);
+                    }
+
+                }
+            };
+        }
+
+        if (mDynamics != null) {
+            // update the dynamics with the correct position and start the
+            // runnable
+            mDynamics.setState(mListTop, velocity, AnimationUtils.currentAnimationTimeMillis());
+            post(mDynamicsRunnable);
+        }
 
         // reset touch state
         mTouchState = TOUCH_STATE_RESTING;
@@ -481,7 +598,51 @@ public class MyListView extends AdapterView<Adapter> {
         if (mRotationEnabled) {
             mListRotation = -(DEGREES_PER_SCREEN * mListTop) / getHeight();
         }
+        setSnapPoint();
         requestLayout();
+    }
+
+    /**
+     * Calculates the point to snap to and snaps to it.
+     */
+    private void setSnapPoint() {
+        if (mRotationEnabled) {
+            final int rotation = mListRotation % 90;
+            int snapPosition = 0;
+
+            // set snap position that corresponds to closest 90 degree rotation
+            if (rotation < 45) {
+                snapPosition = (-(mListRotation - rotation) * getHeight()) / DEGREES_PER_SCREEN;
+            } else {
+                snapPosition = (-(mListRotation + 90 - rotation) * getHeight())
+                        / DEGREES_PER_SCREEN;
+            }
+
+            // if we haven't set mLastSnapPos before and...
+            // the last item is added as a child and..
+            // it's bottom edge is visible
+            if (mLastSnapPos == Integer.MIN_VALUE && mLastItemPosition == mAdapter.getCount() - 1
+                    && getChildBottom(getChildAt(getChildCount() - 1)) < getHeight()) {
+                // then save the last snap position and snap to it
+                mLastSnapPos = snapPosition;
+            }
+
+            if (snapPosition > 0) {
+                snapPosition = 0;
+            } else if (snapPosition < mLastSnapPos) {
+                snapPosition = mLastSnapPos;
+            }
+            mDynamics.setMaxPosition(snapPosition);
+            mDynamics.setMinPosition(snapPosition);
+
+        } else {
+            if (mLastSnapPos == Integer.MIN_VALUE && mLastItemPosition == mAdapter.getCount() - 1
+                    && getChildBottom(getChildAt(getChildCount() - 1)) < getHeight()) {
+                // then save the last snap position and snap to it
+                mLastSnapPos = mListTop;
+                mDynamics.setMinPosition(mLastSnapPos);
+            }
+        }
     }
 
     /**
@@ -662,9 +823,9 @@ public class MyListView extends AdapterView<Adapter> {
     private void fillListDown(int bottomEdge, final int offset) {
         while (bottomEdge + offset < getHeight() && mLastItemPosition < mAdapter.getCount() - 1) {
             mLastItemPosition++;
-            final View newBottomchild = mAdapter.getView(mLastItemPosition, getCachedView(), this);
-            addAndMeasureChild(newBottomchild, LAYOUT_MODE_BELOW);
-            bottomEdge += getChildHeight(newBottomchild);
+            final View newBottomChild = mAdapter.getView(mLastItemPosition, getCachedView(), this);
+            addAndMeasureChild(newBottomChild, LAYOUT_MODE_BELOW);
+            bottomEdge += getChildHeight(newBottomChild);
         }
     }
 
@@ -711,19 +872,23 @@ public class MyListView extends AdapterView<Adapter> {
      */
     private void positionItems() {
         int top = mListTop + mListTopOffset;
+        final float amplitude = getWidth() * AMPLITUDE;
+        final float frequency = 1 / (getHeight() * WAVELENGTH);
 
         for (int index = 0; index < getChildCount(); index++) {
             final View child = getChildAt(index);
 
+            final int offset = (int)(amplitude * Math.sin(2 * Math.PI * frequency * top));
             final int width = child.getMeasuredWidth();
             final int height = child.getMeasuredHeight();
-            final int left = (getWidth() - width) / 2;
+            final int left = offset + (getWidth() - width) / 2;
             final int margin = getChildMargin(child);
             final int childTop = top + margin;
 
             child.layout(left, childTop, left + width, childTop + height);
             top += height + 2 * margin;
         }
+
     }
 
     /**

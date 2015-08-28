@@ -1,11 +1,16 @@
 package com.geekband.luminous.homework.widget;
 
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Rect;
 import android.util.AttributeSet;
+import android.util.Log;
 import android.view.MotionEvent;
+import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.animation.AnimationUtils;
 import android.widget.Adapter;
 import android.widget.AdapterView;
 
@@ -23,6 +28,7 @@ public class MyHorizontalListView extends AdapterView {
     private static final int TOUCH_STATE_RESTING = 0;
     /** 点击的状态 */
     private static final int TOUCH_STATE_CLICK = 1;
+    private static final int VELOCITY_TOLERANCE = 10;
     /** 用于判定是否为scroll的threshold */
     static int TOUCH_THRESHOLD = 10;
     Adapter mAdapter;
@@ -44,7 +50,9 @@ public class MyHorizontalListView extends AdapterView {
     /** 按键状态 */
     private int mTouchState = TOUCH_STATE_RESTING;
     private Runnable longClickHandler;
-
+    VelocityTracker velocityTracker;
+    private Runnable scrollingHandler;
+    private Dynamics mDynamics = new SimpleDynamics(0.9f,0.5f);
     public MyHorizontalListView(Context context, AttributeSet attrs) {
         super(context, attrs);
         this.setClickable(true);
@@ -75,6 +83,42 @@ public class MyHorizontalListView extends AdapterView {
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         super.onMeasure(widthMeasureSpec, heightMeasureSpec);
 
+    }
+
+    @Override
+    protected boolean drawChild(Canvas canvas, View child, long drawingTime) {
+        Bitmap bitMap = child.getDrawingCache();
+        if (bitMap == null) {
+            return super.drawChild(canvas, child, drawingTime);
+        }
+
+
+        int left = child.getLeft();
+        int top = child.getTop();
+
+        // get offset to center
+        int centerX = child.getWidth() / 2;
+        int centerY = child.getHeight() / 2;
+
+        // get absolute center of child
+        float pivotX = left + centerX;
+        float pivotY = top + centerY;
+
+        // calculate distance from center
+        float centerScreen = getWidth() / 2;
+        float distFromCenter = (pivotX - centerScreen) / centerScreen;
+
+        // calculate scale and rotation
+        float scale = (float) (1 - 0.5 * (1 - Math.cos(distFromCenter)));
+        float rotation = 30 * distFromCenter;
+
+        canvas.save();
+        //canvas.rotate(rotation, pivotX, pivotY);
+        canvas.scale(scale, scale, pivotX, pivotY);
+        canvas.translate(0, (1 - scale) * child.getHeight());
+        super.drawChild(canvas, child, drawingTime);
+        canvas.restore();
+        return false;
     }
 
     //TODO:reconstruct the method
@@ -139,8 +183,10 @@ public class MyHorizontalListView extends AdapterView {
             View childView = getChildAt(i);
             int cRight = childView.getMeasuredWidth();
             childView.layout(mLeft + mListLeft, 0, mLeft + cRight + mListLeft, getHeight());
+            childView.setDrawingCacheEnabled(true);
             mLeft += cRight;
             //Log.e(TAG, "onLayout mLeft" + mLeft);
+            VelocityTracker v = VelocityTracker.obtain();
         }
     }
 
@@ -164,13 +210,15 @@ public class MyHorizontalListView extends AdapterView {
     }
 
     @Override
-    public boolean onTouchEvent(MotionEvent event) {
+    public boolean onTouchEvent(final MotionEvent event) {
         switch (event.getAction()) {
             case MotionEvent.ACTION_DOWN:
                 mTouchDownX = (int) event.getX();
                 mTouchDownY = (int) event.getY();
                 mTouchState = TOUCH_STATE_CLICK;
                 startLongClickCheck(mTouchDownX, mTouchDownY);
+                velocityTracker = VelocityTracker.obtain();
+                velocityTracker.addMovement(event);
                 break;
             case MotionEvent.ACTION_MOVE:
                 if (mTouchState == TOUCH_STATE_CLICK) {
@@ -181,13 +229,39 @@ public class MyHorizontalListView extends AdapterView {
                         removeCallbacks(longClickHandler);
                     }
                 } else if (mTouchState == TOUCH_STATE_SCROLLING) {
+                    velocityTracker.addMovement(event);
                     scrollingList(event);
                 }
                 break;
             case MotionEvent.ACTION_UP:
+
                 if (mTouchState == TOUCH_STATE_CLICK) {
                     clickChild((int) event.getX(), (int) event.getY());
+                    endTouch();
+                    break;
+                } else if (mTouchState == TOUCH_STATE_SCROLLING) {
+                    velocityTracker.computeCurrentVelocity(1000);
+                    final float velocity = velocityTracker.getXVelocity();
+                    Log.e(TAG, "onTouchEvent " + velocity);
+                    //TODO
+                    mDynamics.setState(event.getX(),velocity,AnimationUtils.currentAnimationTimeMillis());
+                    if (scrollingHandler == null) {
+
+                        scrollingHandler = new Runnable() {
+                            @Override
+                            public void run() {
+                                mDynamics.update(AnimationUtils.currentAnimationTimeMillis());
+                                scrollingList((int)mDynamics.getPosition(), (int) event.getY());
+                                if (!mDynamics.isAtRest(VELOCITY_TOLERANCE, 10)) {
+                                    // the list is not at rest, so schedule a new frame
+                                    postDelayed(this, 16);
+                                }
+                            }
+                        };
+                    }
+                    postDelayed(scrollingHandler,16);
                 }
+
                 endTouch();
                 break;
             default:
@@ -201,6 +275,8 @@ public class MyHorizontalListView extends AdapterView {
     private void endTouch() {
         removeCallbacks(longClickHandler);
         mTouchState = TOUCH_STATE_RESTING;
+        velocityTracker.recycle();
+        velocityTracker = null;
     }
 
     private void scrollingList(MotionEvent event) {
@@ -216,7 +292,15 @@ public class MyHorizontalListView extends AdapterView {
         mTouchState = TOUCH_STATE_SCROLLING;
         requestLayout();
     }
-
+    private void scrollingList(int x,int y){
+        mListLeft += x - mTouchDownX;
+        rightEdge += x - mTouchDownX;
+        leftEdge += x - mTouchDownX;
+        mTouchDownX = x;
+        mTouchDownY = y;
+        mTouchState = TOUCH_STATE_SCROLLING;
+        requestLayout();
+    }
     private void clickChild(int x, int y) {
         Rect rect = new Rect();
         for (int i = 0; i < getChildCount(); i++) {
@@ -235,7 +319,7 @@ public class MyHorizontalListView extends AdapterView {
                 longClickChild(x, y);
             }
         };
-        postDelayed(longClickHandler, ViewConfiguration.get(getContext()).getLongPressTimeout());
+        postDelayed(longClickHandler, ViewConfiguration.getLongPressTimeout());
     }
 
     private void longClickChild(int x, int y) {

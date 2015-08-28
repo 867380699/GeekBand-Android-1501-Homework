@@ -9,6 +9,7 @@ import com.geekband.luminous.homework.R;
 import com.geekband.luminous.homework.adapter.MyGridAdapter;
 import com.geekband.luminous.homework.model.MyData;
 import com.geekband.luminous.homework.widget.MyListView;
+import com.geekband.luminous.homework.widget.SimpleDynamics;
 
 /**
  * An activity to test listView
@@ -21,6 +22,7 @@ public class MyListViewActivity extends BaseActivity implements AdapterView.OnIt
         lvMain.setAdapter(new MyGridAdapter(context, MyData.picIds));
         lvMain.setOnItemClickListener(this);
         lvMain.setOnItemLongClickListener(this);
+        lvMain.setDynamics(new SimpleDynamics(0.9f,0.5f));
     }
 
     @Override

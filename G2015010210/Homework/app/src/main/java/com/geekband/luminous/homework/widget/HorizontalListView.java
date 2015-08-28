@@ -2,6 +2,10 @@ package com.geekband.luminous.homework.widget;
 
 import android.content.Context;
 import android.database.DataSetObserver;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Matrix;
+import android.graphics.Paint;
 import android.graphics.Rect;
 import android.util.AttributeSet;
 import android.view.GestureDetector;
@@ -34,6 +38,8 @@ public class HorizontalListView extends AdapterView<ListAdapter> {
     private OnItemClickListener mOnItemClicked;
     private OnItemLongClickListener mOnItemLongClicked;
     private boolean mDataChanged = false;
+    private Matrix matrix;
+    Paint paint;
     private GestureDetector.OnGestureListener mOnGesture = new GestureDetector.SimpleOnGestureListener() {
 
         @Override
@@ -196,6 +202,25 @@ public class HorizontalListView extends AdapterView<ListAdapter> {
         addViewInLayout(child, viewPos, params, true);
         child.measure(MeasureSpec.makeMeasureSpec(getWidth(), MeasureSpec.AT_MOST),
                 MeasureSpec.makeMeasureSpec(getHeight(), MeasureSpec.AT_MOST));
+    }
+
+    @Override
+    protected boolean drawChild(Canvas canvas, View child, long drawingTime) {
+        Bitmap bitMap = child.getDrawingCache();
+        if(bitMap == null){
+            return super.drawChild(canvas, child, drawingTime);
+        }
+        if(paint==null){
+            paint = new Paint();
+        }
+        canvas.save();
+        int centerX = getWidth()/2;
+        int childCenterX =(int) child.getX()+child.getWidth()/2;
+        float scale = (float)Math.cos((childCenterX-centerX)*2/centerX);
+        matrix.setScale(scale, scale);
+        canvas.drawBitmap(bitMap, matrix, paint);
+        canvas.restore();
+        return false;
     }
 
     @Override

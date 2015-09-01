@@ -21,6 +21,6 @@
 
         </activity>
         <activity android:name=".Activity.MyListViewActivity"/>
+        <activity android:name=".Activity.IndexPageActivity"/>
     </application>
-
 </manifest>
